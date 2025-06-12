@@ -81,8 +81,11 @@ class FlexTok(nn.Module):
             Dictionary containing the encoded tokens and other intermediate results.
         """
         with torch.no_grad():
+            # first, encode the images into VAE latents.
             data_dict = self.vae.encode(data_dict)
+        # then, encode the VAE latents into register tokens.
         data_dict = self.encoder(data_dict)
+        # finally, quantize the register tokens.
         data_dict = self.regularizer(data_dict)
         return data_dict
 
@@ -123,6 +126,8 @@ class FlexTok(nn.Module):
             perform_norm_guidance=perform_norm_guidance,
         )
         with torch.no_grad():
+            # remember that the decoder outputs the reconstructed VAE latents.
+            # We need to decode them back into images.
             data_dict = self.vae.decode(data_dict)
         return data_dict
 
@@ -164,6 +169,7 @@ class FlexTok(nn.Module):
             List of image token ids. Each of shape like [1, L].
         """
         # The encoder expects a list of [1, C, H, W] images.
+        # "images_read_key": "rgb",
         data_dict = {self.vae.images_read_key: images.split(1)}
         data_dict = self.encode(data_dict)
         token_ids_list = data_dict[self.token_write_key]
@@ -263,10 +269,20 @@ class FlexTokFromHub(FlexTok, PyTorchModelHubMixin):
         # Sanitize config before handing it off to hydra.utils.instantiate()
         _sanitize_hydra_config(config)
 
+        # The instantiate function (from Hydra) builds each submodule from the config dictionary.
+        # the config file is stored remotely with defaults.
         super().__init__(
+            # this has 2 parts: the encoder and the decoder.
+            # the encoder will give us the VAE latents given the input images.
+            # the decoder will give us the reconstructed images given the reconstructed VAE latents.
+            # by default, Stable Diffusion VAE is used.
             vae=instantiate(config["vae"]),
+            # this will give us the register tokens given the VAE latents
             encoder=instantiate(config["encoder"]),
+            # given the register tokens, this will give us the reconstructed latents.
             decoder=instantiate(config["decoder"]),
+            # the regularizer will quantize the register tokens using Finite Scalar Quantization.
+            # by default: the levels are [8,8,8,5,5,5] for the 6 register tokens.
             regularizer=instantiate(config["regularizer"]),
             flow_matching_noise_module=instantiate(config["flow_matching_noise_module"]),
             pipeline=instantiate(config["pipeline"]),
