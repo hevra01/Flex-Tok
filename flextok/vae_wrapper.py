@@ -74,7 +74,7 @@ class StableDiffusionVAE(nn.Module):
         vae_latents_write_key: str,
         images_reconst_write_key: str,
         vae_kl_loss_write_key: Optional[str] = None,
-        latent_channels: int = 16,
+        latent_channels: int = 16, 
         scaling_factor: Optional[float] = None,
         dtype_override: Optional[str] = "fp32",
         hf_hub_path: Optional[str] = None,

@@ -1,0 +1,13 @@
+vae_config:
+  images_read_key: "rgb"
+  vae_latents_read_key: "vae_latents_reconst"
+  vae_latents_write_key: "vae_latents"
+  images_reconst_write_key: "rgb_reconst"
+  vae_kl_loss_write_key: "kl_loss"
+  latent_channels: 16
+  scaling_factor: 0.88
+  dtype_override: "fp32"
+  hf_hub_path: "EPFL-VILAB/flextok_vae_c16"
+  sample_posterior: true
+  force_vae_encode: true
+  frozen: true

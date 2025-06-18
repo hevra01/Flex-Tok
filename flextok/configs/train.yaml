@@ -1,0 +1,28 @@
+# Device settings
+device: cuda
+
+# Data settings
+dataset_path: /path/to/your/dataset
+batch_size: 32
+num_workers: 8
+image_size: 256
+
+# Model settings
+vae_checkpoint: EPFL-VILAB/flextok_vae_c16
+encoder_config: /path/to/encoder_config.yaml
+decoder_config: /path/to/decoder_config.yaml
+regularizer_config: /path/to/regularizer_config.yaml
+
+# Training settings
+num_epochs: 100
+learning_rate: 1e-4
+weight_decay: 1e-4
+save_every: 5  # epochs
+output_dir: ./checkpoints
+
+# Loss weights
+flow_matching_loss_weight: 1.0
+reconstruction_loss_weight: 1.0
+
+# Logging
+log_interval: 100
