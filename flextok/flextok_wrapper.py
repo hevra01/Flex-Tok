@@ -175,6 +175,51 @@ class FlexTok(nn.Module):
         token_ids_list = data_dict[self.token_write_key]
         return token_ids_list
 
+    def estimate_log_density(self, images: torch.Tensor, token_ids_list, guidance_scale=7.5):
+        """Estimate the log density of the input images's latents.
+
+        Args:
+            images: The input image tensor of shape [B, C, H, W].
+
+        Returns:
+            List of estimated densities for each image.
+        """
+        # The encoder expects a list of [1, C, H, W] images.
+        # we first need to encode the images to latents
+        # because we need the density estimates for the latents because
+        # reconstruction by rectified flow happens there.
+        # This creates a dictionary (data_dict) where the key is 
+        # self.vae.images_read_key and the value is a list of tensors 
+        # obtained by splitting the input tensor images along the batch dimension.
+        data_dict = {self.vae.images_read_key: images.split(1)}
+        data_dict = self.encode(data_dict)
+        print(token_ids_list)
+        # Instead of encoding, use provided token IDs if available
+        if token_ids_list is not None:
+
+            # Use the existing preparation util to inject registers and keep_k
+            prepared_data = self._prepare_data_dict_for_detokenization(token_ids_list)
+
+            # Update the current data_dict with decoded registers and keep_k values
+            data_dict.update(prepared_data)
+
+        quant_list = prepared_data[self.quants_write_key]
+        eval_keep_k = prepared_data[self.decoder.module_dict["dec_nested_dropout"].eval_keep_k_read_key]
+
+        for i, (quant, keep_k) in enumerate(zip(quant_list, eval_keep_k)):
+            print(f"\n--- Sample {i} ---")
+            print(f"Register shape: {quant.shape}")  # Should be [1, max_len, 6]
+            print(f"Kept tokens: {keep_k}")
+                        
+
+        print(data_dict.keys())
+        print(len(data_dict["vae_latents"]))
+        # Estimate densities using the pipeline.
+        densities = self.pipeline.estimate_log_density(data_dict, guidance_scale=guidance_scale)
+
+        return densities
+
+
     def _get_padded_token_seq(self, token_ids: torch.Tensor, max_seq_len: int) -> torch.Tensor:
         """Pad the token sequence to the maximum length.
 
@@ -243,7 +288,16 @@ class FlexTok(nn.Module):
             Tensor of decoded RGB images of shape [B, C, H, W].
         """
         # Map the data dict fields to those expected by the resampler decoder.
+        
         data_dict = self._prepare_data_dict_for_detokenization(token_ids_list=token_ids_list)
+
+        quant_list = data_dict[self.quants_write_key]
+        eval_keep_k = data_dict[self.decoder.module_dict["dec_nested_dropout"].eval_keep_k_read_key]
+
+        for i, (quant, keep_k) in enumerate(zip(quant_list, eval_keep_k)):
+            print(f"\n--- Sample {i} ---")
+            print(f"Register shape: {quant.shape}")  # Should be [1, max_len, 6]
+            print(f"Kept tokens: {keep_k}")
 
         data_dict = self.decode(
             data_dict=data_dict,

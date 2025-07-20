@@ -1,8 +1,11 @@
 # For licensing see accompanying LICENSE file.
 # Copyright (C) 2025 Apple Inc. and EPFL. All Rights Reserved.
 import copy
+import math
+from time import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+from pytest import param
 import torch
 
 from tqdm import tqdm
@@ -169,3 +172,129 @@ class MinRFPipeline:
 
         data_dict[self.reconst_write_key] = images_list
         return data_dict
+    
+    # ================================================================
+    #  Conditional log‑density estimation (single‑graph, batched)
+    # ================================================================
+    def estimate_log_density(
+        self,
+        data_dict: Dict[str, Any],
+        timesteps: int = 25,
+        guidance_scale: Union[float, Callable] = 7.5,
+        hutchinson_samples: int = 1,
+        verbose: bool = True,
+    ):
+        """
+        Estimate log p(x|cond) via the divergence of the guided velocity field.
+        """
+
+        # --------------------------------------------------------------------
+        # small helpers
+        # --------------------------------------------------------------------
+        def _shallow_dict_copy(d):
+            """Copy the *container* hierarchy, but keep tensor leaves."""
+            out = {}
+            for k, v in d.items():
+                if isinstance(v, list):
+                    out[k] = v[:]  # shallow list copy
+                elif isinstance(v, dict):
+                    out[k] = v.copy()
+                else:
+                    out[k] = v
+            return out
+
+        def _cfg(u_c, u_u, scale):
+            return [u_u[i] + scale * (u_c[i] - u_u[i]) for i in range(len(u_c))]
+
+        # --------------------------------------------------------------------
+        # preparation
+        # --------------------------------------------------------------------
+        dt          = 1.0 / timesteps
+        device      = self.model.device
+        latents     = data_dict["vae_latents"]          # list of [1,C,H,W]
+        B           = len(latents)
+        log_probs   = torch.zeros(B, 1, device=device)
+
+        if verbose:
+            pbar = tqdm(total=timesteps, desc="estimating log‑density")
+
+        # --------------------------------------------------------------------
+        # main Euler integration loop
+        # --------------------------------------------------------------------
+        for step in range(1, timesteps + 1):
+            t = step / timesteps
+            data_dict[self.timesteps_read_key]   = t * torch.ones(B, device=device)
+            data_dict[self.noised_images_read_key] = latents
+
+            # ================================================================
+            # 1) forward pass WITH gradients  → guided velocity u_guided
+            # ================================================================
+            # attach grad to a *clone* of each latent so we keep the running copy
+            latents_var = [x.detach().clone().requires_grad_(True) for x in latents]
+
+            # replace the tensor references in a *shallow* copy of data_dict
+            data_dict_grad = _shallow_dict_copy(data_dict)
+            data_dict_grad[self.noised_images_read_key] = latents_var
+
+            # --- conditional branch
+            outputs_cond = self.model(data_dict_grad)[self.reconst_write_key]
+
+            # --- unconditional branch (drop registers)
+            gs      = guidance_scale(t) if callable(guidance_scale) else guidance_scale
+            dd_un   = _shallow_dict_copy(data_dict_grad)
+            dd_un["eval_dropout_mask"] = [True] * B          # activate null‑cond
+            outputs_un   = self.model(dd_un)[self.reconst_write_key]
+
+            # --- classifier‑free guidance
+            u_guided = _cfg(outputs_cond, outputs_un, gs)     # list length B
+
+            # ================================================================
+            # 2) divergence estimate per sample (Hutchinson)
+            # ================================================================
+            for j, (x_var, u) in enumerate(zip(latents_var, u_guided)):
+                div = 0.0
+                for _ in range(hutchinson_samples):
+                    e   = torch.randn_like(x_var)
+                    dot = (-u * e).sum()            # scalar eᵀu
+                    jvp = torch.autograd.grad(dot, x_var, retain_graph=True)[0]
+                    div += (jvp * e).sum()
+                div   /= hutchinson_samples
+
+                log_probs[j] -= dt * div.detach()   # integrate  d log p = -div dt
+                latents[j]    = latents[j] + dt * u.detach()  # Euler update
+
+            torch.cuda.empty_cache()
+
+            if verbose:
+                pbar.update()
+
+        if verbose:
+            pbar.close()
+
+        # --------------------------------------------------------------------
+        # 3) Add Gaussian baseline  log p_N(x_T)   (T = 1)
+        # --------------------------------------------------------------------
+        D      = latents[0].numel()                         # dimensionality per sample
+        const  = -0.5 * D * math.log(2 * math.pi)           # −½·D·log(2π)
+
+        for j, z in enumerate(latents):
+            noise_logp = const - 0.5 * (z.view(-1) ** 2).sum()
+            log_probs[j] += noise_logp                           # complete absolute log‑p
+
+        return log_probs  # tensor [B,1]   (same type as before)
+    
+
+    def count_decoder_params(self):
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+        print(f"Total decoder parameters      : {total_params:,}")
+        print(f"Trainable decoder parameters  : {trainable_params:,}")
+        print(f"Decoder size in MB (float32)  : {total_params * 4 / 1e6:.2f} MB")
+
+        print(self.model.training)  # Should be False if in eval mode
+        for param in self.model.parameters():
+            param.requires_grad = False  # disables weight grads
+
+
+
