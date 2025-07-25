@@ -179,7 +179,7 @@ class MinRFPipeline:
     def estimate_log_density(
         self,
         data_dict: Dict[str, Any],
-        timesteps: int = 25,
+        timesteps: int = 50,
         guidance_scale: Union[float, Callable] = 7.5,
         hutchinson_samples: int = 1,
         verbose: bool = True,
@@ -214,6 +214,8 @@ class MinRFPipeline:
         latents     = data_dict["vae_latents"]          # list of [1,C,H,W]
         B           = len(latents)
         log_probs   = torch.zeros(B, 1, device=device)
+        #divergence = []
+        #progress = {0: [], 1:[]}
 
         if verbose:
             pbar = tqdm(total=timesteps, desc="estimating log‑density")
@@ -221,7 +223,7 @@ class MinRFPipeline:
         # --------------------------------------------------------------------
         # main Euler integration loop
         # --------------------------------------------------------------------
-        for step in range(1, timesteps + 1):
+        for step in range(0, timesteps):
             t = step / timesteps
             data_dict[self.timesteps_read_key]   = t * torch.ones(B, device=device)
             data_dict[self.noised_images_read_key] = latents
@@ -237,16 +239,16 @@ class MinRFPipeline:
             data_dict_grad[self.noised_images_read_key] = latents_var
 
             # --- conditional branch
-            outputs_cond = self.model(data_dict_grad)[self.reconst_write_key]
+            u_guided = self.model(data_dict_grad)[self.reconst_write_key]
 
-            # --- unconditional branch (drop registers)
-            gs      = guidance_scale(t) if callable(guidance_scale) else guidance_scale
-            dd_un   = _shallow_dict_copy(data_dict_grad)
-            dd_un["eval_dropout_mask"] = [True] * B          # activate null‑cond
-            outputs_un   = self.model(dd_un)[self.reconst_write_key]
+            # # --- unconditional branch (drop registers)
+            # gs      = guidance_scale(t) if callable(guidance_scale) else guidance_scale
+            # dd_un   = _shallow_dict_copy(data_dict_grad)
+            # dd_un["eval_dropout_mask"] = [True] * B          # activate null‑cond
+            # outputs_un   = self.model(dd_un)[self.reconst_write_key]
 
-            # --- classifier‑free guidance
-            u_guided = _cfg(outputs_cond, outputs_un, gs)     # list length B
+            # # --- classifier‑free guidance
+            # u_guided = _cfg(outputs_cond, outputs_un, gs)     # list length B
 
             # ================================================================
             # 2) divergence estimate per sample (Hutchinson)
@@ -255,12 +257,14 @@ class MinRFPipeline:
                 div = 0.0
                 for _ in range(hutchinson_samples):
                     e   = torch.randn_like(x_var)
-                    dot = (-u * e).sum()            # scalar eᵀu
+                    dot = (u * e).sum()            # scalar eᵀu
                     jvp = torch.autograd.grad(dot, x_var, retain_graph=True)[0]
                     div += (jvp * e).sum()
-                div   /= hutchinson_samples
+                div /= hutchinson_samples
 
-                log_probs[j] -= dt * div.detach()   # integrate  d log p = -div dt
+
+                log_probs[j] += dt * div.detach()   # integrate d log p = +div dt     # because f maps x → z
+
                 latents[j]    = latents[j] + dt * u.detach()  # Euler update
 
             torch.cuda.empty_cache()
@@ -281,7 +285,7 @@ class MinRFPipeline:
             noise_logp = const - 0.5 * (z.view(-1) ** 2).sum()
             log_probs[j] += noise_logp                           # complete absolute log‑p
 
-        return log_probs  # tensor [B,1]   (same type as before)
+        return log_probs
     
 
     def count_decoder_params(self):
