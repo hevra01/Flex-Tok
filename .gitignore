@@ -10,3 +10,5 @@ wandb/
 *.DS_Store
 *pkl
 *.egg-info
+
+*.png
