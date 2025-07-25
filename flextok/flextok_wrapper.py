@@ -175,7 +175,7 @@ class FlexTok(nn.Module):
         token_ids_list = data_dict[self.token_write_key]
         return token_ids_list
 
-    def estimate_log_density(self, images: torch.Tensor, token_ids_list, guidance_scale=7.5):
+    def estimate_log_density(self, images: torch.Tensor, token_ids_list, guidance_scale=7.5, hutchinson_samples=1):
         """Estimate the log density of the input images's latents.
 
         Args:
@@ -193,7 +193,7 @@ class FlexTok(nn.Module):
         # obtained by splitting the input tensor images along the batch dimension.
         data_dict = {self.vae.images_read_key: images.split(1)}
         data_dict = self.encode(data_dict)
-        print(token_ids_list)
+        
         # Instead of encoding, use provided token IDs if available
         if token_ids_list is not None:
 
@@ -203,19 +203,9 @@ class FlexTok(nn.Module):
             # Update the current data_dict with decoded registers and keep_k values
             data_dict.update(prepared_data)
 
-        quant_list = prepared_data[self.quants_write_key]
-        eval_keep_k = prepared_data[self.decoder.module_dict["dec_nested_dropout"].eval_keep_k_read_key]
-
-        for i, (quant, keep_k) in enumerate(zip(quant_list, eval_keep_k)):
-            print(f"\n--- Sample {i} ---")
-            print(f"Register shape: {quant.shape}")  # Should be [1, max_len, 6]
-            print(f"Kept tokens: {keep_k}")
                         
-
-        print(data_dict.keys())
-        print(len(data_dict["vae_latents"]))
         # Estimate densities using the pipeline.
-        densities = self.pipeline.estimate_log_density(data_dict, guidance_scale=guidance_scale)
+        densities = self.pipeline.estimate_log_density(data_dict, guidance_scale=guidance_scale, hutchinson_samples=hutchinson_samples)
 
         return densities
 
