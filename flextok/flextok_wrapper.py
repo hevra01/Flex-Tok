@@ -205,7 +205,7 @@ class FlexTok(nn.Module):
 
                         
         # Estimate densities using the pipeline.
-        densities = self.pipeline.estimate_log_density(data_dict, guidance_scale=guidance_scale, hutchinson_samples=hutchinson_samples)
+        densities = self.pipeline.estimate_log_density_debug(data_dict, guidance_scale=guidance_scale, hutchinson_samples=hutchinson_samples)
 
         return densities
 
@@ -280,14 +280,6 @@ class FlexTok(nn.Module):
         # Map the data dict fields to those expected by the resampler decoder.
         
         data_dict = self._prepare_data_dict_for_detokenization(token_ids_list=token_ids_list)
-
-        quant_list = data_dict[self.quants_write_key]
-        eval_keep_k = data_dict[self.decoder.module_dict["dec_nested_dropout"].eval_keep_k_read_key]
-
-        for i, (quant, keep_k) in enumerate(zip(quant_list, eval_keep_k)):
-            print(f"\n--- Sample {i} ---")
-            print(f"Register shape: {quant.shape}")  # Should be [1, max_len, 6]
-            print(f"Kept tokens: {keep_k}")
 
         data_dict = self.decode(
             data_dict=data_dict,
