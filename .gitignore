@@ -12,3 +12,6 @@ wandb/
 *.egg-info
 
 *.png
+
+
+/BS/data_mani_compress/work/thesis/thesis/external/flextok/EPFL-VILAB/flextok_d18_d18_in1k
