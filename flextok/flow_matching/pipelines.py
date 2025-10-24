@@ -318,15 +318,17 @@ class MinRFPipeline:
                     out[k] = v
             return out
 
-        def _cfg(u_c, u_u, scale):
-            return [u_u[i] + scale * (u_c[i] - u_u[i]) for i in range(len(u_c))]
-
         # --------------------------------------------------------------------
         # preparation
         # --------------------------------------------------------------------
         dt          = 1.0 / timesteps
         device      = self.model.device
         latents     = data_dict["vae_latents"]          # list of [1,C,H,W]
+
+        # 1) use a single batched tensor instead of a list
+        #    (if your model requires a list, keep both: a batched x for grads, and the list view for API)
+        x = torch.cat([t for t in data_dict["vae_latents"]], dim=0).to(device)  # [B,C,H,W]
+
         B           = len(latents)
         log_probs   = torch.zeros(B, 1, device=device)
 
@@ -345,6 +347,9 @@ class MinRFPipeline:
             # 1) forward pass WITH gradients  → guided velocity u_guided
             # ================================================================
             # attach grad to a *clone* of each latent so we keep the running copy
+            # we dont need the gradients since we are only doing a forward pass
+            # for estimating the divergence, we only need the derivative of the output w.r.t input
+            # not with any intermediate weights.
             latents_var = [x.detach().clone().requires_grad_(True) for x in latents]
 
             # replace the tensor references in a *shallow* copy of data_dict
@@ -361,25 +366,50 @@ class MinRFPipeline:
             startime = time() 
             outputs_un = self.model(dd_un)[self.reconst_write_key]
             print(f"Time for uncond model pass: {time() - startime:.4f} seconds")
-            
+
+            # Convert lists → batched tensors for vectorized Hutchinson
+            #   x_b  : [B,C,H,W] (built from latents_var)
+            #   u_b  : [B,C,H,W] (built from outputs_un)
+            x_b = torch.cat(latents_var, dim=0)     # graph depends on each latents_var[j]
+            u_b = torch.cat(outputs_un, dim=0)
         
-            # ================================================================
-            # 2) divergence estimate per sample (Hutchinson)
-            # ================================================================
-            for j, (x_var, u) in enumerate(zip(latents_var, outputs_un)):
-                div = 0.0
-                for _ in range(hutchinson_samples):
-                    e   = torch.randn_like(x_var)
-                    dot = (u * e).sum()            # scalar eᵀu
-                    jvp = torch.autograd.grad(dot, x_var, retain_graph=True)[0]
-                    div += (jvp * e).sum()
-                div /= hutchinson_samples
+            # ------------------------------------------
+            # 3) Hutchinson divergence estimate (vectorized over batch)
+            #    div_j ≈ (e_j^T J_j e_j)  with J_j = ∂u_j/∂x_j
+            # ------------------------------------------
+            div_batch = torch.zeros(B, device=device)
+            for s in range(hutchinson_samples):
+                e_b = torch.randn_like(x_b)                         # noise with same shape as x
 
+                # a scalar for each sample in the batch
+                dot = (u_b * e_b).flatten(1).sum(dim=1)   # [B]
+               
+                #jvp_list = torch.autograd.grad(dot, latents_var, retain_graph=True)
+                jvp_list = torch.autograd.grad(
+                outputs=dot,                       # [B]
+                inputs=latents_var,                # list of B tensors [1,C,H,W]
+                grad_outputs=torch.ones_like(dot), # [B]  tells autograd: d/dx_j dot_j
+                retain_graph=True
+                )
 
-                log_probs[j] += dt * div.detach()   # integrate d log p = +div dt     # because f maps x → z
-                latents[j]    = latents[j] + dt * u.detach()  # Euler update, going from data to noise
+                # Per-sample Hutchinson term: (J_j e_j) · e_j
+                #   jvp_list[j] has shape [1,C,H,W]; e_b[j] has shape [C,H,W] or [1,C,H,W]? We keep [1,C,H,W] for safety
+                for j, jvp in enumerate(jvp_list):
+                    div_batch[j] += (jvp * e_b[j:j+1]).sum()
+            div_batch /= max(hutchinson_samples, 1)
 
-            torch.cuda.empty_cache()
+            # ------------------------------------------
+            # 4) Integrate log-density and evolve particles (Euler)
+            # ------------------------------------------
+            # d log p = +div dt  (because flow maps data → noise)
+            log_probs[:, 0] += dt * div_batch.detach()
+
+            # Euler step for x: x_{t+dt} = x_t + u(x_t,t) dt   (data → noise)
+            for j in range(B):
+                latents[j] = latents[j] + dt * outputs_un[j].detach()
+
+            # Release references ASAP (helps peak memory in tight loops)
+            del latents_var, x_b, u_b, e_b, jvp_list, dot, div_batch
 
             if verbose:
                 pbar.update()
@@ -387,19 +417,8 @@ class MinRFPipeline:
         if verbose:
             pbar.close()
 
-        # --------------------------------------------------------------------
-        # 3) Add Gaussian log density  log p_N(x_T)   (T = 1)
-        # --------------------------------------------------------------------
-        D      = latents[0].numel()                         # dimensionality per sample
-        const  = -0.5 * D * math.log(2 * math.pi)           # −½·D·log(2π)
-
-        for j, z in enumerate(latents):
-            noise_logp = const - 0.5 * (z.view(-1) ** 2).sum()
-            log_probs[j] += noise_logp                           # complete absolute log‑p
-
         return log_probs
-    
-    
+        
 
     def count_decoder_params(self):
         total_params = sum(p.numel() for p in self.model.parameters())
