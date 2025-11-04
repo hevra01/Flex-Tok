@@ -298,6 +298,7 @@ class MinRFPipeline:
         guidance_scale: Union[float, Callable] = 7.5,
         hutchinson_samples: int = 1,
         verbose: bool = True,
+        conditional: bool = False,
     ):
         """
         Estimate log p(x|cond) via the divergence of the guided velocity field.
@@ -358,14 +359,18 @@ class MinRFPipeline:
 
             
             dd_un   = _shallow_dict_copy(data_dict_grad)
-            dd_un["eval_dropout_mask"] = [True] * B          # activate null‑cond
+
+            # we could do conditional or unconditional density estimation.
+            # if we are doing it unconditionally, we set the dropout mask to true
+            if not conditional:
+                dd_un["eval_dropout_mask"] = [True] * B          # activate null‑cond
 
             # here we assume that the model predicts the velocity field while
             # going from data to noise
             # check time spent here: 
-            startime = time() 
+            #startime = time() 
             outputs_un = self.model(dd_un)[self.reconst_write_key]
-            print(f"Time for uncond model pass: {time() - startime:.4f} seconds")
+            #print(f"Time for model pass: {time() - startime:.4f} seconds")
 
             # Convert lists → batched tensors for vectorized Hutchinson
             #   x_b  : [B,C,H,W] (built from latents_var)
