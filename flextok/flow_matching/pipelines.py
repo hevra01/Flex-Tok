@@ -5,6 +5,7 @@ import math
 from time import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 from pytest import param
 import torch
 
@@ -409,15 +410,27 @@ class MinRFPipeline:
             # d log p = +div dt  (because flow maps data → noise)
             log_probs[:, 0] += dt * div_batch.detach()
 
+            
             # Euler step for x: x_{t+dt} = x_t + u(x_t,t) dt   (data → noise)
             for j in range(B):
                 latents[j] = latents[j] + dt * outputs_un[j].detach()
+
 
             # Release references ASAP (helps peak memory in tight loops)
             del latents_var, x_b, u_b, e_b, jvp_list, dot, div_batch
 
             if verbose:
                 pbar.update()
+
+        # --------------------------------------------------------------------
+        # Add Gaussian log density  log p_N(x_T)   (T = 1)
+        # --------------------------------------------------------------------
+        D      = latents[0].numel()                         # dimensionality per sample
+        const  = -0.5 * D * math.log(2 * math.pi)           # −½·D·log(2π)
+
+        for j, z in enumerate(latents):
+            noise_logp = const - 0.5 * (z.view(-1) ** 2).sum()
+            log_probs[j] += noise_logp                           # complete absolute log‑p
 
         if verbose:
             pbar.close()
