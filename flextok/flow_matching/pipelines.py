@@ -332,7 +332,8 @@ class MinRFPipeline:
         x = torch.cat([t for t in data_dict["vae_latents"]], dim=0).to(device)  # [B,C,H,W]
 
         B           = len(latents)
-        log_probs   = torch.zeros(B, 1, device=device)
+        integral_part   = torch.zeros(B, 1, device=device)
+        source_part     = torch.zeros(B, 1, device=device)
 
         if verbose:
             pbar = tqdm(total=timesteps, desc="estimating log-density")
@@ -408,7 +409,7 @@ class MinRFPipeline:
             # 4) Integrate log-density and evolve particles (Euler)
             # ------------------------------------------
             # d log p = +div dt  (because flow maps data → noise)
-            log_probs[:, 0] += dt * div_batch.detach()
+            integral_part[:, 0] += dt * div_batch.detach()
 
             
             # Euler step for x: x_{t+dt} = x_t + u(x_t,t) dt   (data → noise)
@@ -429,13 +430,14 @@ class MinRFPipeline:
         const  = -0.5 * D * math.log(2 * math.pi)           # −½·D·log(2π)
 
         for j, z in enumerate(latents):
-            noise_logp = const - 0.5 * (z.view(-1) ** 2).sum()
-            log_probs[j] += noise_logp                           # complete absolute log‑p
+            source_part[j] = const - 0.5 * (z.view(-1) ** 2).sum()
+            #integral_part[j] += noise_logp                           # complete absolute log‑p
 
         if verbose:
             pbar.close()
-
-        return log_probs
+        # i have changed the code very slightly to return both the source and integral parts
+        # for analysis.
+        return integral_part, source_part
         
 
     def count_decoder_params(self):
