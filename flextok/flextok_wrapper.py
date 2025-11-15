@@ -175,7 +175,7 @@ class FlexTok(nn.Module):
         token_ids_list = data_dict[self.token_write_key]
         return token_ids_list
 
-    def estimate_log_density(self, images: torch.Tensor, token_ids_list, guidance_scale=7.5, hutchinson_samples=1, verbose=False, conditional=False) -> list[torch.Tensor]:
+    def estimate_log_density(self, images: torch.Tensor, token_ids_list, guidance_scale=7.5, hutchinson_samples=1, verbose=False, conditional=False, timesteps=25) -> list[torch.Tensor]:
         """Estimate the log density of the input images's latents.
 
         Args:
@@ -205,7 +205,7 @@ class FlexTok(nn.Module):
 
                         
         # Estimate densities using the pipeline.
-        integral_part, source_part = self.pipeline.estimate_log_density_debug(data_dict, guidance_scale=guidance_scale, hutchinson_samples=hutchinson_samples, verbose=verbose, conditional=conditional)
+        integral_part, source_part = self.pipeline.estimate_log_density_debug(data_dict, guidance_scale=guidance_scale, hutchinson_samples=hutchinson_samples, verbose=verbose, conditional=conditional, timesteps=timesteps)
 
         return integral_part, source_part
 
