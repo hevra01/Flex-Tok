@@ -64,7 +64,7 @@ class MinRFPipeline:
         vae_image_sizes: Optional[Union[int, List[Tuple[int, int]]]] = None,
         verbose: bool = True,
         guidance_scale: Union[float, Callable] = 1.0,
-        perform_norm_guidance: bool = False,
+        perform_norm_guidance: bool = True,
     ) -> Dict[str, Any]:
         """
         Inference pipeline forward function, performing the denoising.
@@ -447,6 +447,7 @@ class MinRFPipeline:
         hutchinson_samples: int = 1,
         verbose: bool = True,
         conditional: bool = False,
+        perform_norm_guidance: bool = True,
     ):
         """
         Estimate log p(x|cond) via the divergence of a classifier‑free guidance (CFG)
@@ -457,7 +458,10 @@ class MinRFPipeline:
             u_cond(x,t): conditional flow (uses registers, no dropout).
             u_un(x,t):   unconditional flow (drop registers via eval_dropout_mask=True).
         - We combine them with guidance_scale s (constant or a callable of t):
-            u_cfg = u_un + s * (u_cond - u_un) = (1-s) * u_un + s * u_cond
+            • If perform_norm_guidance is False → standard CFG
+                  u_cfg = u_un + s * (u_cond - u_un)
+            • If perform_norm_guidance is True  → APG/normalized guidance
+                  u_cfg = normalized_guidance(u_cond, u_un, s, momentum)
         - Hutchinson divergence and the Euler update both use u_cfg.
 
         This makes the divergence correspond to the guided field actually used for sampling.
@@ -492,6 +496,10 @@ class MinRFPipeline:
         B           = len(latents)
         integral_part   = torch.zeros(B, 1, device=device)
         source_part     = torch.zeros(B, 1, device=device)
+
+        # For APG (normalized guidance), maintain one momentum buffer per sample.
+        if perform_norm_guidance:
+            momentum_buffers = [MomentumBuffer(-0.5) for _ in range(B)]
 
         if verbose:
             pbar = tqdm(total=timesteps, desc="estimating log-density")
@@ -532,11 +540,24 @@ class MinRFPipeline:
             # Guidance scale can be a float or a schedule(g(t))
             s = guidance_scale(t) if callable(guidance_scale) else float(guidance_scale)
 
-            # Combine flows per sample: u_cfg = u_un + s * (u_cond - u_un)
-            outputs_cfg = [
-                outputs_un[j] + s * (outputs_cond[j] - outputs_un[j])
-                for j in range(B)
-            ]
+            # Combine flows per sample
+            outputs_cfg = []
+            for j in range(B):
+                if perform_norm_guidance:
+                    # APG / normalized guidance (helps with stability at higher guidance)
+                    out_cfg = normalized_guidance(
+                        outputs_cond[j],
+                        outputs_un[j],
+                        s,
+                        momentum_buffers[j],
+                        eta=0.0,
+                        norm_threshold=2.5,
+                    )
+                else:
+                    # Standard classifier-free guidance
+                    out_cfg = classifier_free_guidance(outputs_cond[j], outputs_un[j], s)
+                outputs_cfg.append(out_cfg)
+
 
             # Convert lists → batched tensors for vectorized Hutchinson
             #   x_b  : [B,C,H,W] (built from latents_var)

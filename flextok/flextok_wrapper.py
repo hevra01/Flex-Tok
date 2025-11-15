@@ -97,7 +97,7 @@ class FlexTok(nn.Module):
         vae_image_sizes: Optional[Union[int, List[Tuple[int, int]]]] = None,
         verbose: bool = True,
         guidance_scale: Union[float, Callable] = 1.0,
-        perform_norm_guidance: bool = False,
+        perform_norm_guidance: bool = True,
         **ignore_kwargs,
     ) -> Dict[str, Any]:
         """Decodes a dictionary of quantized tokens into images.
