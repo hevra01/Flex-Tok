@@ -17,7 +17,6 @@ from .cfg_utils import MomentumBuffer, classifier_free_guidance, normalized_guid
 
 __all__ = ["MinRFPipeline"]
 
-
 class MinRFPipeline:
     """
     Minimal Rectified Flow (RF) inference pipeline, adapted from https://github.com/cloneofsimo/minRF.
@@ -173,126 +172,9 @@ class MinRFPipeline:
 
         data_dict[self.reconst_write_key] = images_list
         return data_dict
+
     
-    # ================================================================
-    #  Conditional log‑density estimation (single‑graph, batched)
-    # ================================================================
     def estimate_log_density(
-        self,
-        data_dict: Dict[str, Any],
-        timesteps: int = 25,
-        guidance_scale: Union[float, Callable] = 7.5,
-        hutchinson_samples: int = 1,
-        verbose: bool = True,
-    ):
-        """
-        Estimate log p(x|cond) via the divergence of the guided velocity field.
-        """
-
-        # --------------------------------------------------------------------
-        # small helpers
-        # --------------------------------------------------------------------
-        def _shallow_dict_copy(d):
-            """Copy the *container* hierarchy, but keep tensor leaves."""
-            out = {}
-            for k, v in d.items():
-                if isinstance(v, list):
-                    out[k] = v[:]  # shallow list copy
-                elif isinstance(v, dict):
-                    out[k] = v.copy()
-                else:
-                    out[k] = v
-            return out
-
-        def _cfg(u_c, u_u, scale):
-            return [u_u[i] + scale * (u_c[i] - u_u[i]) for i in range(len(u_c))]
-
-        # --------------------------------------------------------------------
-        # preparation
-        # --------------------------------------------------------------------
-        dt          = 1.0 / timesteps
-        device      = self.model.device
-        latents     = data_dict["vae_latents"]          # list of [1,C,H,W]
-        B           = len(latents)
-        log_probs   = torch.zeros(B, 1, device=device)
-        #divs   = torch.zeros(B, 1, device=device)
-        #divergence = []
-        #progress = {0: [], 1:[]}
-
-        if verbose:
-            pbar = tqdm(total=timesteps, desc="estimating log-density")
-
-        # --------------------------------------------------------------------
-        # main Euler integration loop
-        # --------------------------------------------------------------------
-        for step in range(0, timesteps):
-            t = step / timesteps
-            data_dict[self.timesteps_read_key]   = t * torch.ones(B, device=device)
-            data_dict[self.noised_images_read_key] = latents
-
-            # ================================================================
-            # 1) forward pass WITH gradients  → guided velocity u_guided
-            # ================================================================
-            # attach grad to a *clone* of each latent so we keep the running copy
-            latents_var = [x.detach().clone().requires_grad_(True) for x in latents]
-
-            # replace the tensor references in a *shallow* copy of data_dict
-            data_dict_grad = _shallow_dict_copy(data_dict)
-            data_dict_grad[self.noised_images_read_key] = latents_var
-
-            # --- conditional branch
-            #u_guided = self.model(data_dict_grad)[self.reconst_write_key]
-
-            # # --- unconditional branch (drop registers)
-            # gs      = guidance_scale(t) if callable(guidance_scale) else guidance_scale
-            dd_un   = _shallow_dict_copy(data_dict_grad)
-            dd_un["eval_dropout_mask"] = [True] * B          # activate null‑cond
-
-            # here we assume that the model predicts the velocity field while
-            # going from data to noise 
-            outputs_un   = self.model(dd_un)[self.reconst_write_key]
-
-            # # --- classifier‑free guidance
-            # u_guided = _cfg(outputs_cond, outputs_un, gs)     # list length B
-
-            # ================================================================
-            # 2) divergence estimate per sample (Hutchinson)
-            # ================================================================
-            for j, (x_var, u) in enumerate(zip(latents_var, outputs_un)):
-                div = 0.0
-                for _ in range(hutchinson_samples):
-                    e   = torch.randn_like(x_var)
-                    dot = (u * e).sum()            # scalar eᵀu
-                    jvp = torch.autograd.grad(dot, x_var, retain_graph=True)[0]
-                    div += (jvp * e).sum()
-                div /= hutchinson_samples
-
-
-                log_probs[j] += dt * div.detach()   # integrate d log p = +div dt     # because f maps x → z
-                #divs[j] += div.detach()         # store the divergence
-                latents[j]    = latents[j] + dt * u.detach()  # Euler update, going from data to noise
-
-            torch.cuda.empty_cache()
-
-            if verbose:
-                pbar.update()
-
-        if verbose:
-            pbar.close()
-
-        # --------------------------------------------------------------------
-        # 3) Add Gaussian log density  log p_N(x_T)   (T = 1)
-        # --------------------------------------------------------------------
-        D      = latents[0].numel()                         # dimensionality per sample
-        const  = -0.5 * D * math.log(2 * math.pi)           # −½·D·log(2π)
-
-        for j, z in enumerate(latents):
-            noise_logp = const - 0.5 * (z.view(-1) ** 2).sum()
-            log_probs[j] += noise_logp                           # complete absolute log‑p
-
-        return log_probs#, divs
-    
-    def estimate_log_density_debug(
         self,
         data_dict: Dict[str, Any],
         timesteps: int = 25,
@@ -439,191 +321,169 @@ class MinRFPipeline:
         # for analysis.
         return integral_part, source_part
         
-    def estimate_log_density_debug_2(
-        self,
-        data_dict: Dict[str, Any],
-        timesteps: int = 25,
-        guidance_scale: Union[float, Callable] = 7.5,
-        hutchinson_samples: int = 1,
-        verbose: bool = True,
-        conditional: bool = False,
-        perform_norm_guidance: bool = True,
-    ):
+        
+    def estimate_log_density_cfg(self,
+            data_dict,
+            timesteps=25,
+            guidance_scale=7.5,
+            hutchinson_samples=1,
+            verbose=True,
+            conditional=False,
+            perform_norm_guidance=True):
         """
-        Estimate log p(x|cond) via the divergence of a classifier‑free guidance (CFG)
-        combination of conditional and unconditional velocity fields.
+        Estimate log p(x|cond) using divergence of a guided vector field via Hutchinson's estimator.
 
-        What changes vs estimate_log_density_debug:
-        - At every time step, we run the decoder twice to obtain:
-            u_cond(x,t): conditional flow (uses registers, no dropout).
-            u_un(x,t):   unconditional flow (drop registers via eval_dropout_mask=True).
-        - We combine them with guidance_scale s (constant or a callable of t):
-            • If perform_norm_guidance is False → standard CFG
-                  u_cfg = u_un + s * (u_cond - u_un)
-            • If perform_norm_guidance is True  → APG/normalized guidance
-                  u_cfg = normalized_guidance(u_cond, u_un, s, momentum)
-        - Hutchinson divergence and the Euler update both use u_cfg.
+        Computes divergence of u_cfg = s*u_cond + (1-s)*u_un through:
+            div(u_cfg) = E[ eps^T J_cfg eps ]
+                        = s * E[ eps^T J_cond eps ] + (1-s)*E[ eps^T J_un eps ]
 
-        This makes the divergence correspond to the guided field actually used for sampling.
+        We compute conditional and unconditional forwards *separately* to avoid keeping
+        massive compute graphs in memory simultaneously.
         """
 
-        # --------------------------------------------------------------------
-        # small helpers
-        # --------------------------------------------------------------------
-        def _shallow_dict_copy(d):
-            """Copy the *container* hierarchy, but keep tensor leaves."""
+        # ----------------------------------------------------
+        # Helper: shallow dict copy
+        # ----------------------------------------------------
+        def _shallow_copy(d):
             out = {}
             for k, v in d.items():
-                if isinstance(v, list):
-                    out[k] = v[:]  # shallow list copy
-                elif isinstance(v, dict):
-                    out[k] = v.copy()
-                else:
-                    out[k] = v
+                if isinstance(v, list): out[k] = v[:] 
+                elif isinstance(v, dict): out[k] = v.copy()
+                else: out[k] = v
             return out
 
-        # --------------------------------------------------------------------
-        # preparation
-        # --------------------------------------------------------------------
-        dt          = 1.0 / timesteps
-        device      = self.model.device
-        latents     = data_dict["vae_latents"]          # list of [1,C,H,W]
+        # ----------------------------------------------------
+        # Setup
+        # ----------------------------------------------------
+        device = self.model.device
+        dt     = 1.0 / timesteps
+        latents_list = data_dict["vae_latents"]   # list of [1,C,H,W]
+        B = len(latents_list)
 
-        # 1) use a single batched tensor instead of a list
-        #    (if your model requires a list, keep both: a batched x for grads, and the list view for API)
-        x = torch.cat([t for t in data_dict["vae_latents"]], dim=0).to(device)  # [B,C,H,W]
+        # Accumulated ∫ div dt
+        integral_part = torch.zeros(B, 1, device=device)
+        source_part   = torch.zeros(B, 1, device=device)
 
-        B           = len(latents)
-        integral_part   = torch.zeros(B, 1, device=device)
-        source_part     = torch.zeros(B, 1, device=device)
-
-        # For APG (normalized guidance), maintain one momentum buffer per sample.
         if perform_norm_guidance:
             momentum_buffers = [MomentumBuffer(-0.5) for _ in range(B)]
 
         if verbose:
+            from tqdm import tqdm
             pbar = tqdm(total=timesteps, desc="estimating log-density")
 
-        # --------------------------------------------------------------------
-        # main Euler integration loop
-        # --------------------------------------------------------------------
-        for step in range(0, timesteps):
+        # ===========================================================
+        #                        MAIN LOOP
+        # ===========================================================
+        for step in range(timesteps):
+
+            # Current time
             t = step / timesteps
-            data_dict[self.timesteps_read_key]   = t * torch.ones(B, device=device)
-            data_dict[self.noised_images_read_key] = latents
+            data_dict[self.timesteps_read_key]     = t * torch.ones(B, device=device)
+            data_dict[self.noised_images_read_key] = latents_list
 
-            # ================================================================
-            # 1) forward pass WITH gradients  → guided velocity u_guided
-            # ================================================================
-            # attach grad to a *clone* of each latent so we keep the running copy
-            # we dont need the gradients since we are only doing a forward pass
-            # for estimating the divergence, we only need the derivative of the output w.r.t input
-            # not with any intermediate weights.
-            latents_var = [x.detach().clone().requires_grad_(True) for x in latents]
+            # --------------------------------------------------------
+            # 1) Create grad-enabled copies of latents
+            # --------------------------------------------------------
+            latents_var = [x.detach().clone().requires_grad_(True) for x in latents_list]
+            data_dict_g = _shallow_copy(data_dict)
+            data_dict_g[self.noised_images_read_key] = latents_var
 
-            # replace the tensor references in a *shallow* copy of data_dict
-            data_dict_grad = _shallow_dict_copy(data_dict)
-            data_dict_grad[self.noised_images_read_key] = latents_var
+            # Prepare conditional and unconditional input dicts
+            dd_cond = _shallow_copy(data_dict_g)
+            dd_un   = _shallow_copy(data_dict_g)
+            dd_un["eval_dropout_mask"] = [True] * B
 
-            # Build two views of the same graph inputs:
-            #  - dd_cond: conditional (uses registers as provided)
-            #  - dd_un:   unconditional (drop registers via eval_dropout_mask)
-            dd_cond = _shallow_dict_copy(data_dict_grad)
-            dd_un   = _shallow_dict_copy(data_dict_grad)
-            dd_un["eval_dropout_mask"] = [True] * B  # unconditional branch
+            # --------------------------------------------------------
+            # 2) Two separate forwards
+            # --------------------------------------------------------
+            # Build two independent graphs
+            u_cond_list = self.model(dd_cond)[self.reconst_write_key]  # list of [1,C,H,W]
+            u_un_list   = self.model(dd_un)[self.reconst_write_key]
 
-            # Forward passes to obtain per-sample velocity fields.
-            # Each element of the returned list has shape [1, C, H, W]
-            outputs_cond = self.model(dd_cond)[self.reconst_write_key]
-            outputs_un   = self.model(dd_un)[self.reconst_write_key]
-
-            # Guidance scale can be a float or a schedule(g(t))
+            # Guidance scale
             s = guidance_scale(t) if callable(guidance_scale) else float(guidance_scale)
 
-            # Combine flows per sample
-            outputs_cfg = []
+            # --------------------------------------------------------
+            # 3) Build the guided velocity u_cfg = s*u_cond + (1-s)*u_un
+            #    (no gradients yet)
+            # --------------------------------------------------------
+            u_cfg_list = []
             for j in range(B):
                 if perform_norm_guidance:
-                    # APG / normalized guidance (helps with stability at higher guidance)
-                    out_cfg = normalized_guidance(
-                        outputs_cond[j],
-                        outputs_un[j],
-                        s,
-                        momentum_buffers[j],
-                        eta=0.0,
-                        norm_threshold=2.5,
+                    out = normalized_guidance(
+                        u_cond_list[j], u_un_list[j], s,
+                        momentum_buffers[j], eta=0.0, norm_threshold=2.5
                     )
                 else:
-                    # Standard classifier-free guidance
-                    out_cfg = classifier_free_guidance(outputs_cond[j], outputs_un[j], s)
-                outputs_cfg.append(out_cfg)
+                    out = classifier_free_guidance(u_cond_list[j], u_un_list[j], s)
+                u_cfg_list.append(out)
 
+            # For divergence computation, flatten list → batched
+            x_b     = torch.cat(latents_var, dim=0)      # [B,C,H,W]
+            u_cond  = torch.cat(u_cond_list, dim=0)      # [B,C,H,W]
+            u_un    = torch.cat(u_un_list,   dim=0)      # [B,C,H,W]
 
-            # Convert lists → batched tensors for vectorized Hutchinson
-            #   x_b  : [B,C,H,W] (built from latents_var)
-            #   u_b  : [B,C,H,W] (built from outputs_un)
-            x_b = torch.cat(latents_var, dim=0)     # graph depends on each latents_var[j]
-            # Stack the combined field for vectorized algebra in Hutchinson
-            u_b = torch.cat(outputs_cfg, dim=0)
-        
-            # ------------------------------------------
-            # 3) Hutchinson divergence estimate (vectorized over batch)
-            #    div_j ≈ (e_j^T J_j e_j)  with J_j = ∂u_j/∂x_j
-            # ------------------------------------------
+            # --------------------------------------------------------
+            # 4) Hutchinson estimator (separately for cond & un)
+            # --------------------------------------------------------
             div_batch = torch.zeros(B, device=device)
-            for s in range(hutchinson_samples):
-                e_b = torch.randn_like(x_b)                         # noise with same shape as x
 
-                # a scalar for each sample in the batch
-                dot = (u_b * e_b).flatten(1).sum(dim=1)   # [B]
-               
-                #jvp_list = torch.autograd.grad(dot, latents_var, retain_graph=True)
-                jvp_list = torch.autograd.grad(
-                outputs=dot,                       # [B]
-                inputs=latents_var,                # list of B tensors [1,C,H,W]
-                grad_outputs=torch.ones_like(dot), # [B]  tells autograd: d/dx_j dot_j
-                retain_graph=True
-                )
+            for i in range(hutchinson_samples):
+                retain = (i < hutchinson_samples - 1)  # keep graph until last sample
+                
+                eps = torch.randn_like(x_b)  # [B,C,H,W]
 
-                # Per-sample Hutchinson term: (J_j e_j) · e_j
-                #   jvp_list[j] has shape [1,C,H,W]; e_b[j] has shape [C,H,W] or [1,C,H,W]? We keep [1,C,H,W] for safety
-                for j, jvp in enumerate(jvp_list):
-                    div_batch[j] += (jvp * e_b[j:j+1]).sum()
-            div_batch /= max(hutchinson_samples, 1)
+                # ---- Conditional branch ----
+                dot_cond = (u_cond * eps).sum()  # scalar
+                grad_cond = torch.autograd.grad(
+                    dot_cond, latents_var, retain_graph=retain, create_graph=False, allow_unused=True
+                )[0]  # [B,C,H,W]
+                div_cond = (grad_cond * eps).flatten(1).sum(dim=1)  # [B]
+                del grad_cond
 
-            # ------------------------------------------
-            # 4) Integrate log-density and evolve particles (Euler)
-            # ------------------------------------------
-            # d log p = +div dt  (because flow maps data → noise)
+                # ---- Unconditional branch ----
+                dot_un = (u_un * eps).sum()
+
+                grad_un = torch.autograd.grad(
+                    dot_un, latents_var, retain_graph=retain, create_graph=False, allow_unused=True
+                )[0]
+                div_un = (grad_un * eps).flatten(1).sum(dim=1)  # [B]
+                del grad_un
+
+                # Combine for CFG
+                div_cfg = s * div_cond + (1 - s) * div_un
+                div_batch += div_cfg
+
+                if i == hutchinson_samples - 1:
+                    # On last sample, free up graph memory after this
+                    torch._dynamo.reset()
+
+            div_batch /= max(1, hutchinson_samples)
+
+            # --------------------------------------------------------
+            # 5) Integrate divergence and Euler advance latents
+            # --------------------------------------------------------
             integral_part[:, 0] += dt * div_batch.detach()
 
-            
-            # Euler step for x: x_{t+dt} = x_t + u(x_t,t) dt   (data → noise)
-            for j in range(B):
-                # Use the guided field to evolve the particles consistently
-                latents[j] = latents[j] + dt * outputs_cfg[j].detach()
-
-
-            # Release references ASAP (helps peak memory in tight loops)
-            del latents_var, x_b, u_b, e_b, jvp_list, dot, div_batch
+            with torch.no_grad():
+                for j in range(B):
+                    latents_list[j] = latents_list[j] + dt * u_cfg_list[j]
 
             if verbose:
                 pbar.update()
 
-        # --------------------------------------------------------------------
-        # Add Gaussian log density  log p_N(x_T)   (T = 1)
-        # --------------------------------------------------------------------
-        D      = latents[0].numel()                         # dimensionality per sample
-        const  = -0.5 * D * math.log(2 * math.pi)           # −½·D·log(2π)
-
-        for j, z in enumerate(latents):
-            source_part[j] = const - 0.5 * (z.view(-1) ** 2).sum()
-            #integral_part[j] += noise_logp                           # complete absolute log‑p
-
         if verbose:
             pbar.close()
-        # i have changed the code very slightly to return both the source and integral parts
-        # for analysis.
+
+        # ------------------------------------------------------------
+        # 6) Final Gaussian source term
+        # ------------------------------------------------------------
+        D = latents_list[0].numel()
+        const = -0.5 * D * math.log(2 * math.pi)
+
+        for j, z in enumerate(latents_list):
+            source_part[j] = const - 0.5 * (z.view(-1) ** 2).sum()
+
         return integral_part, source_part
 
     def count_decoder_params(self):
@@ -637,6 +497,3 @@ class MinRFPipeline:
         print(self.model.training)  # Should be False if in eval mode
         for param in self.model.parameters():
             param.requires_grad = False  # disables weight grads
-
-
-

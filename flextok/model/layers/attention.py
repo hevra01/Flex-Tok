@@ -60,7 +60,8 @@ class FlexAttention(nn.Module):
         # μP compatible scaling. Equals standard 1.0 / head_dim ** 0.5 for commonly used head_dim=64.
         self.scale = 8.0 / self.head_dim if muP_scale else None
 
-        self.use_flex_attention = use_flex_attention
+        self.use_flex_attention = use_flex_attention  #  False
+
         if use_flex_attention:
             # If used, should always be compiled
             self.flex_attention = torch.compile(flex_attention, dynamic=False)

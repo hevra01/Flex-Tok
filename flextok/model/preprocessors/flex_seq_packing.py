@@ -210,7 +210,7 @@ class BlockWiseSequencePacker(nn.Module):
 
         self.compile_block_mask = compile_block_mask
         self.create_block_mask = torch.compiler.disable(create_block_mask_cached)
-        self.return_materialized_mask = return_materialized_mask
+        self.return_materialized_mask = return_materialized_mask  #TODO , True  
 
         # For pretty printing
         self._init_args = locals().copy()
