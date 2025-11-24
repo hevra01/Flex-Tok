@@ -205,11 +205,10 @@ class FlexTok(nn.Module):
 
                         
         # Estimate densities using the pipeline.
-        integral_part, source_part = self.pipeline.estimate_log_density_APG(data_dict, guidance_scale=guidance_scale, hutchinson_samples=hutchinson_samples, verbose=verbose, conditional=conditional, timesteps=timesteps)
+        integral_part, source_part = self.pipeline.estimate_log_density(data_dict, guidance_scale=guidance_scale, hutchinson_samples=hutchinson_samples, verbose=verbose, conditional=conditional, timesteps=timesteps)
 
         return integral_part, source_part
-
-
+        
     def _get_padded_token_seq(self, token_ids: torch.Tensor, max_seq_len: int) -> torch.Tensor:
         """Pad the token sequence to the maximum length.
 
