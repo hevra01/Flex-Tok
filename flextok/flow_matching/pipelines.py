@@ -212,7 +212,7 @@ class MinRFPipeline:
         B            = len(latents)
         integral_part   = torch.zeros(B, 1, device=device)
         source_part     = torch.zeros(B, 1, device=device)
-
+        integral_part_list = []   # NEW: keep per-step contributions
         if verbose:
             pbar = tqdm(total=timesteps, desc="estimating log-density")
 
@@ -287,7 +287,11 @@ class MinRFPipeline:
             # 4) Integrate log-density and evolve particles (Euler)
             # ------------------------------------------
             # d log p = +div dt  (because flow maps data → noise)
-            integral_part[:, 0] += dt * div_batch.detach()
+            temp = dt * div_batch.detach()
+            #integral_part[:, 0] += temp
+
+            # integral_part[:, 0] += temp          # <-- remove summation
+            integral_part_list.append(temp)        # <-- NEW: keep per-step contributions
 
             
             # Euler step for x: x_{t+dt} = x_t + u(x_t,t) dt   (data → noise)
@@ -315,7 +319,7 @@ class MinRFPipeline:
             pbar.close()
         # i have changed the code very slightly to return both the source and integral parts
         # for analysis.
-        return integral_part, source_part
+        return integral_part_list, source_part
     
     def estimate_log_density_debug(
         self,
