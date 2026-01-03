@@ -486,7 +486,7 @@ class MinRFPipeline:
         for j, z in enumerate(latents_list):
             source_part[j] = const - 0.5 * (z.view(-1) ** 2).sum()
 
-        return integral_part, source_part
+        return integral_part_list, source_part
 
     def count_decoder_params(self):
         total_params = sum(p.numel() for p in self.model.parameters())
