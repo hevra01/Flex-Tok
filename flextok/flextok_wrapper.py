@@ -204,7 +204,7 @@ class FlexTok(nn.Module):
             data_dict.update(prepared_data)
 
         # Estimate densities using the pipeline.
-        integral_part, source_part = self.pipeline.estimate_log_density_complete(data_dict, guidance_scale=guidance_scale, hutchinson_samples=hutchinson_samples, verbose=verbose, conditional=conditional, timesteps=timesteps)
+        integral_part, source_part = self.pipeline.estimate_log_density(data_dict, guidance_scale=guidance_scale, hutchinson_samples=hutchinson_samples, verbose=verbose, conditional=conditional, timesteps=timesteps)
 
         return integral_part, source_part
 
