@@ -320,139 +320,6 @@ class MinRFPipeline:
         # i have changed the code very slightly to return both the source and integral parts
         # for analysis.
         return integral_part_list, source_part
-    
-    def estimate_log_density_debug(
-        self,
-        data_dict: Dict[str, Any],
-        timesteps: int = 25,
-        guidance_scale: Union[float, Callable] = 7.5,
-        hutchinson_samples: int = 1,
-        verbose: bool = True,
-        conditional: bool = False,
-    ):
-        """
-        Estimate log p(x|cond) via the divergence of the guided velocity field.
-        """
-
-        # --------------------------------------------------------------------
-        # small helpers
-        # --------------------------------------------------------------------
-        def _shallow_dict_copy(d):
-            """Copy the *container* hierarchy, but keep tensor leaves."""
-            out = {}
-            for k, v in d.items():
-                if isinstance(v, list):
-                    out[k] = v[:]  # shallow list copy
-                elif isinstance(v, dict):
-                    out[k] = v.copy()
-                else:
-                    out[k] = v
-            return out
-
-        # --------------------------------------------------------------------
-        # preparation
-        # --------------------------------------------------------------------
-        dt          = 1.0 / timesteps
-        device      = self.model.device
-        latents     = data_dict["vae_latents"]          # list of [1,C,H,W]
-
-        # 1) use a single batched tensor instead of a list
-        #    (if your model requires a list, keep both: a batched x for grads, and the list view for API)
-        x = torch.cat([t for t in data_dict["vae_latents"]], dim=0).to(device)  # [B,C,H,W]
-
-        B           = len(latents)
-        log_probs   = torch.zeros(B, 1, device=device)
-
-        if verbose:
-            pbar = tqdm(total=timesteps, desc="estimating log-density")
-
-        # --------------------------------------------------------------------
-        # main Euler integration loop
-        # --------------------------------------------------------------------
-        for step in range(0, timesteps):
-            t = step / timesteps
-            data_dict[self.timesteps_read_key]   = t * torch.ones(B, device=device)
-            data_dict[self.noised_images_read_key] = latents
-
-            # ================================================================
-            # 1) forward pass WITH gradients  → guided velocity u_guided
-            # ================================================================
-            # attach grad to a *clone* of each latent so we keep the running copy
-            # we dont need the gradients since we are only doing a forward pass
-            # for estimating the divergence, we only need the derivative of the output w.r.t input
-            # not with any intermediate weights.
-            latents_var = [x.detach().clone().requires_grad_(True) for x in latents]
-
-            # replace the tensor references in a *shallow* copy of data_dict
-            data_dict_grad = _shallow_dict_copy(data_dict)
-            data_dict_grad[self.noised_images_read_key] = latents_var
-
-            
-            dd_un   = _shallow_dict_copy(data_dict_grad)
-
-            # we could do conditional or unconditional density estimation.
-            # if we are doing it unconditionally, we set the dropout mask to true
-            if not conditional:
-                dd_un["eval_dropout_mask"] = [True] * B          # activate null‑cond
-
-            # here we assume that the model predicts the velocity field while
-            # going from data to noise
-            # check time spent here: 
-            #startime = time() 
-            outputs_un = self.model(dd_un)[self.reconst_write_key]
-            #print(f"Time for model pass: {time() - startime:.4f} seconds")
-
-            # Convert lists → batched tensors for vectorized Hutchinson
-            #   x_b  : [B,C,H,W] (built from latents_var)
-            #   u_b  : [B,C,H,W] (built from outputs_un)
-            x_b = torch.cat(latents_var, dim=0)     # graph depends on each latents_var[j]
-            u_b = torch.cat(outputs_un, dim=0)
-        
-            # ------------------------------------------
-            # 3) Hutchinson divergence estimate (vectorized over batch)
-            #    div_j ≈ (e_j^T J_j e_j)  with J_j = ∂u_j/∂x_j
-            # ------------------------------------------
-            div_batch = torch.zeros(B, device=device)
-            for s in range(hutchinson_samples):
-                e_b = torch.randn_like(x_b)                         # noise with same shape as x
-
-                # a scalar for each sample in the batch
-                dot = (u_b * e_b).flatten(1).sum(dim=1)   # [B]
-               
-                #jvp_list = torch.autograd.grad(dot, latents_var, retain_graph=True)
-                jvp_list = torch.autograd.grad(
-                outputs=dot,                       # [B]
-                inputs=latents_var,                # list of B tensors [1,C,H,W]
-                grad_outputs=torch.ones_like(dot), # [B]  tells autograd: d/dx_j dot_j
-                retain_graph=True
-                )
-
-                # Per-sample Hutchinson term: (J_j e_j) · e_j
-                #   jvp_list[j] has shape [1,C,H,W]; e_b[j] has shape [C,H,W] or [1,C,H,W]? We keep [1,C,H,W] for safety
-                for j, jvp in enumerate(jvp_list):
-                    div_batch[j] += (jvp * e_b[j:j+1]).sum()
-            div_batch /= max(hutchinson_samples, 1)
-
-            # ------------------------------------------
-            # 4) Integrate log-density and evolve particles (Euler)
-            # ------------------------------------------
-            # d log p = +div dt  (because flow maps data → noise)
-            log_probs[:, 0] += dt * div_batch.detach()
-
-            # Euler step for x: x_{t+dt} = x_t + u(x_t,t) dt   (data → noise)
-            for j in range(B):
-                latents[j] = latents[j] + dt * outputs_un[j].detach()
-
-            # Release references ASAP (helps peak memory in tight loops)
-            del latents_var, x_b, u_b, e_b, jvp_list, dot, div_batch
-
-            if verbose:
-                pbar.update()
-
-        if verbose:
-            pbar.close()
-
-        return log_probs
         
         
     def estimate_log_density_complete(self,
@@ -462,7 +329,7 @@ class MinRFPipeline:
             hutchinson_samples=1,
             verbose=True,
             conditional=False,
-            perform_norm_guidance=True):
+            perform_norm_guidance=False):
         """
         Estimate log p(x|cond) for the APG-guided vector field u_cfg using Hutchinson's estimator.
 
@@ -493,6 +360,7 @@ class MinRFPipeline:
 
         # Accumulated ∫ div dt
         integral_part = torch.zeros(B, 1, device=device)
+        integral_part_list = []   # NEW: keep per-step contributions
         source_part   = torch.zeros(B, 1, device=device)
 
         if perform_norm_guidance:
@@ -595,7 +463,9 @@ class MinRFPipeline:
             # --------------------------------------------------------
             # 5) Integrate divergence and Euler advance latents
             # --------------------------------------------------------
-            integral_part[:, 0] += dt * div_batch.detach()
+            #integral_part[:, 0] += dt * div_batch.detach()
+            temp = dt * div_batch.detach()
+            integral_part_list.append(temp)        # <-- NEW: keep per-step contributions
 
             with torch.no_grad():
                 for j in range(B):
