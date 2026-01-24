@@ -173,7 +173,124 @@ class MinRFPipeline:
         data_dict[self.reconst_write_key] = images_list
         return data_dict
 
+    def forward_pass_until_t_hyper(
+        self,
+        data_dict: Dict[str, Any],
+        t_hyper: float,
+        timesteps: int = 50,
+    ) -> List[torch.Tensor]:
+        """
+        This will simulate the forward pass, from data to noise, until a given timestep t, which becomes the hyperparameter.
+        """
+        device = self.model.device
+        dt = 1.0 / timesteps
+
+        latents = data_dict["vae_latents"]
+        
+        # Determine batch size from the latents/noised images list
+        # The pipeline expects lists of tensors shaped [1, C, H, W]
+        batch_size = len(data_dict["vae_latents"])
+        if batch_size == 0:
+            raise ValueError("single_step_denoise: could not infer batch size; provide vae latents.")
+
+        # we are estimating the LID unconditionally, we drop the register token conditioning
+        data_dict["eval_dropout_mask"] = [True] * batch_size          # activate null‑cond
+        data_dict[self.noised_images_read_key] = latents
+
+        # convert time -> number of Euler steps
+        if not (0.0 <= t_hyper <= 1.0):
+            raise ValueError("t_hyper must be in [0,1].")
+        n_steps = int(t_hyper * timesteps)
+
+        # pre-allocate timestep tensor
+        t_vec = torch.empty(batch_size, device=device)
+
+        # Use no_grad to avoid creating inference-mode tensors that break autograd later
+        with torch.no_grad():
+            for step in range(0, n_steps-1):
+                t = step / timesteps
+                t_vec.fill_(t)
+
+                data_dict[self.timesteps_read_key] = t_vec
+
+                # Single forward pass; the model writes its prediction under reconst_write_key
+                out_dd = self.model(data_dict)[self.reconst_write_key]
+
+                for j in range(batch_size):
+                    latents[j].add_(out_dd[j], alpha=dt)
+
+        return data_dict
     
+
+    
+    def forward_pass_at_t_hyper(
+        self,
+        data_dict: Dict[str, Any],
+        t_hyper: float,
+        timesteps: int = 50,
+        hutchinson_samples: int = 4,
+    ) -> List[torch.Tensor]:
+        
+        """
+        Timestep is the full number of steps.
+        t_hyper is in [0,1], representing the fraction of total steps.
+        n_steps is the number of steps to take to reach t_hyper.
+        """
+        # find device and batch size
+        device = self.model.device
+        batch_size = len(data_dict["vae_latents"])
+        if batch_size == 0:
+            raise ValueError("single_step_denoise: could not infer batch size; provide vae latents.")
+        
+        # convert time -> number of Euler steps
+        if not (0.0 <= t_hyper <= 1.0):
+            raise ValueError("t_hyper must be in [0,1].")
+        n_steps = int(t_hyper * timesteps)
+
+        # pre-allocate timestep tensor
+        t_vec = torch.empty(batch_size, device=device)
+        t_vec.fill_((n_steps - 1) / timesteps)
+        data_dict[self.timesteps_read_key] = t_vec
+
+        with torch.enable_grad():
+            
+            # this was the latent that led to out_dd and we want to take the gradient w.r.t it
+            latents_var = [x.detach().clone().requires_grad_(True) for x in data_dict[self.noised_images_read_key]]
+            data_dict[self.noised_images_read_key] = latents_var
+            
+            out_dd = self.model(data_dict)[self.reconst_write_key]
+
+            print("hev2")
+            # ------------------------------------------
+            # 3) Hutchinson divergence estimate (vectorized over batch)
+            #    div_j ≈ (e_j^T J_j e_j)  with J_j = ∂u_j/∂x_j
+            # ------------------------------------------
+            div_batch = torch.zeros(batch_size, device=device)
+            for s in range(hutchinson_samples):
+                e_list = [torch.randn_like(x) for x in latents_var]
+
+                # a scalar for each sample in the batch
+                dot = torch.stack([(u * e).sum() for u, e in zip(out_dd, e_list)])  # [B]
+                
+                #jvp_list = torch.autograd.grad(dot, latents_var, retain_graph=True)
+                jvp_list = torch.autograd.grad(
+                    outputs=dot,                       # [B]
+                    inputs=latents_var,                # list of B tensors [1,C,H,W]
+                    grad_outputs=torch.ones_like(dot), # [B]  tells autograd: d/dx_j dot_j
+                    retain_graph=True
+                )
+
+                for j, jvp in enumerate(jvp_list):
+                    div_batch[j] += (jvp * e_list[j]).sum()
+            div_batch /= max(hutchinson_samples, 1)
+
+            # we need to compute the norm of the vector field for the estimation of LID
+            v = torch.concat(out_dd, dim=0) # this is a list of vector fields
+            v_norm = (v.reshape(batch_size, -1) ** 2).sum(dim=1)  # [B]
+
+            return div_batch, v_norm
+
+
     def estimate_log_density(
         self,
         data_dict: Dict[str, Any],

@@ -175,6 +175,35 @@ class FlexTok(nn.Module):
         token_ids_list = data_dict[self.token_write_key]
         return token_ids_list
 
+    def forward_pass_t_hyper(self, images: torch.Tensor, t_hyper, token_ids_list) -> list[torch.Tensor]:
+        """
+        Given the clean data point, we can move it towards noise. t_hyper is in [0,1].
+        t_hyper is used to know when to stop on the way from data to noise.
+        """
+        # The encoder expects a list of [1, C, H, W] images.
+        # we first need to encode the images to latents
+        # because we need the density estimates for the latents because
+        # reconstruction by rectified flow happens there.
+        # This creates a dictionary (data_dict) where the key is 
+        # self.vae.images_read_key and the value is a list of tensors 
+        # obtained by splitting the input tensor images along the batch dimension.
+        data_dict = {self.vae.images_read_key: images.split(1)}
+        with torch.no_grad():
+            # first, encode the images into VAE latents.
+            data_dict = self.vae.encode(data_dict)
+
+        # Instead of encoding, use provided token IDs if available
+        if token_ids_list is not None:
+
+            # Use the existing preparation util to inject registers and keep_k
+            prepared_data = self._prepare_data_dict_for_detokenization(token_ids_list)
+
+            # Update the current data_dict with decoded registers and keep_k values
+            data_dict.update(prepared_data)
+
+        data_dict = self.pipeline.forward_pass_until_t_hyper(data_dict, t_hyper=t_hyper)
+        return data_dict
+
     def estimate_log_density(self, images: torch.Tensor, token_ids_list, guidance_scale=7.5, hutchinson_samples=1, verbose=False, conditional=False, timesteps=25) -> list[torch.Tensor]:
         """Estimate the log density of the input images's latents.
 
@@ -287,6 +316,39 @@ class FlexTok(nn.Module):
 
         decoded_images_list = data_dict[self.image_write_key]
         return torch.cat(decoded_images_list, dim=0)
+    
+    def count_params_and_size(self):
+        total_params_overall = 0
+        total_bytes_overall = 0
+
+        for name, module in self.named_children():
+            total_params = 0
+            total_bytes = 0
+
+            for p in module.parameters():
+                total_params += p.numel()
+                total_bytes += p.numel() * p.element_size()
+
+            # accumulate overall totals
+            total_params_overall += total_params
+            total_bytes_overall += total_bytes
+
+            mb = total_bytes / (1024 ** 2)
+            gb = total_bytes / (1024 ** 3)
+
+            print(
+                f"Module: {name} | "
+                f"Params: {total_params:,} | "
+                f"Size: {mb:.2f} MB ({gb:.3f} GB)"
+            )
+
+        print("-" * 60)
+        print(
+            f"TOTAL | "
+            f"Params: {total_params_overall:,} | "
+            f"Size: {total_bytes_overall / (1024 ** 2):.2f} MB "
+            f"({total_bytes_overall / (1024 ** 3):.3f} GB)"
+        )
 
 
 class FlexTokFromHub(FlexTok, PyTorchModelHubMixin):
