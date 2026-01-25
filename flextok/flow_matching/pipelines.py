@@ -255,7 +255,7 @@ class MinRFPipeline:
         with torch.enable_grad():
             
             # this was the latent that led to out_dd and we want to take the gradient w.r.t it
-            latents_var = [x.detach().clone().requires_grad_(True) for x in data_dict[self.noised_images_read_key]]
+            latents_var = [x.detach().requires_grad_(True) for x in data_dict[self.noised_images_read_key]]
             data_dict[self.noised_images_read_key] = latents_var
             
             out_dd = self.model(data_dict)[self.reconst_write_key]
@@ -277,7 +277,7 @@ class MinRFPipeline:
                     outputs=dot,                       # [B]
                     inputs=latents_var,                # list of B tensors [1,C,H,W]
                     grad_outputs=torch.ones_like(dot), # [B]  tells autograd: d/dx_j dot_j
-                    retain_graph=True
+                    retain_graph=(s < hutchinson_samples - 1)
                 )
 
                 for j, jvp in enumerate(jvp_list):
@@ -288,7 +288,7 @@ class MinRFPipeline:
             v = torch.concat(out_dd, dim=0) # this is a list of vector fields
             v_norm = (v.reshape(batch_size, -1) ** 2).sum(dim=1)  # [B]
 
-            return div_batch, v_norm
+            return div_batch.detach(), v_norm.detach()
 
 
     def estimate_log_density(
