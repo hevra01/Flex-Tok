@@ -175,34 +175,6 @@ class FlexTok(nn.Module):
         token_ids_list = data_dict[self.token_write_key]
         return token_ids_list
 
-    def forward_pass_t_hyper(self, images: torch.Tensor, t_hyper, token_ids_list) -> list[torch.Tensor]:
-        """
-        Given the clean data point, we can move it towards noise. t_hyper is in [0,1].
-        t_hyper is used to know when to stop on the way from data to noise.
-        """
-        # The encoder expects a list of [1, C, H, W] images.
-        # we first need to encode the images to latents
-        # because we need the density estimates for the latents because
-        # reconstruction by rectified flow happens there.
-        # This creates a dictionary (data_dict) where the key is 
-        # self.vae.images_read_key and the value is a list of tensors 
-        # obtained by splitting the input tensor images along the batch dimension.
-        data_dict = {self.vae.images_read_key: images.split(1)}
-        with torch.no_grad():
-            # first, encode the images into VAE latents.
-            data_dict = self.vae.encode(data_dict)
-
-        # Instead of encoding, use provided token IDs if available
-        if token_ids_list is not None:
-
-            # Use the existing preparation util to inject registers and keep_k
-            prepared_data = self._prepare_data_dict_for_detokenization(token_ids_list)
-
-            # Update the current data_dict with decoded registers and keep_k values
-            data_dict.update(prepared_data)
-
-        data_dict = self.pipeline.forward_pass_until_t_hyper(data_dict, t_hyper=t_hyper)
-        return data_dict
 
     def estimate_log_density(self, images: torch.Tensor, token_ids_list, guidance_scale=7.5, hutchinson_samples=1, verbose=False, conditional=False, timesteps=25) -> list[torch.Tensor]:
         """Estimate the log density of the input images's latents.
