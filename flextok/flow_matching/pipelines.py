@@ -260,7 +260,6 @@ class MinRFPipeline:
             
             out_dd = self.model(data_dict)[self.reconst_write_key]
 
-            print("hev2")
             # ------------------------------------------
             # 3) Hutchinson divergence estimate (vectorized over batch)
             #    div_j ≈ (e_j^T J_j e_j)  with J_j = ∂u_j/∂x_j
@@ -367,7 +366,6 @@ class MinRFPipeline:
             # check time spent here: 
             #startime = time() 
             outputs_un = self.model(dd_un)[self.reconst_write_key]
-            #print(f"Time for model pass: {time() - startime:.4f} seconds")
 
             # Convert lists → batched tensors for vectorized Hutchinson
             #   x_b  : [B,C,H,W] (built from latents_var)
